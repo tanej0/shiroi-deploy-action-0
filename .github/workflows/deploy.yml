@@ -1,5 +1,4 @@
 name: Build and Deploy
-# 1 2 3 4
 on:
   push:
     branches:
@@ -91,7 +90,7 @@ jobs:
           lfs: true
           submodules: recursive
 
-      - name: Checkout LFS objects
+      - name: Checkout LFS objects1
         run: git lfs checkout
       - uses: pnpm/action-setup@v2
 
