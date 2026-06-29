@@ -101,7 +101,7 @@ jobs:
           cache: 'pnpm'
       - uses: jongwooo/next-cache@v1
       - name: Install dependencies
-        run: pnpm install
+        run: pnpm install --no-frozen-lockfile
       - name: Build project
         env:
           BASE_URL: ${{ secrets.BASE_URL }}
