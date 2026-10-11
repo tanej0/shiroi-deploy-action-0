@@ -32,9 +32,21 @@ running_entry() {
 # A PM2 process can retain an old resolved script after the symlink changes.
 if active_entry=$(running_entry); then old_entry=$active_entry; fi
 restart_frontend() {
+  # Preserve the user's options while overriding an old hardcoded script path.
+  cat > "$state/runtime.config.cjs" <<'CONFIG'
+const fs = require('node:fs');
+const path = require('node:path');
+const base = path.resolve(__dirname, '..');
+const config = require(path.join(base, 'ecosystem.config.js'));
+const name = process.env.YOH_PM2_APP || 'Yohaku';
+module.exports = {...config, apps: config.apps.map(app => app.name === name
+  ? {...app, cwd: path.resolve(base, app.cwd || '.'),
+      script: fs.realpathSync(path.join(base, 'server.js'))}
+  : app)};
+CONFIG
   if pm2 describe "$app" >/dev/null 2>&1; then pm2 delete "$app" || return 1; fi
   # The frontend must not inherit the deployment lock after this script exits.
-  pm2 start "$config" --only "$app" --update-env 9>&-
+  YOH_PM2_APP="$app" pm2 start "$state/runtime.config.cjs" --only "$app" --update-env 9>&-
 }
 preview_pid=
 switched=false
