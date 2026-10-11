@@ -43,7 +43,12 @@ case "$1" in
     target=$(readlink -f "$YOH_DEPLOY_BASE/server.js")
     test ! -f "$(dirname "$target")/FAIL_RELOAD" || exit 1
     (cd "$(dirname "$target")"; exec /bin/sleep 3600) </dev/null >/dev/null 2>&1 &
-    echo $! > "$YOH_DEPLOY_BASE/.fake-pid"
+    pid=$!
+    echo "$pid" > "$YOH_DEPLOY_BASE/.fake-pid"
+    for ((i=0; i<100; i++)); do
+      [[ $(readlink -f "/proc/$pid/cwd") == "$(dirname "$target")" ]] && break
+      /bin/sleep 0.01
+    done
     echo "$target" > "$YOH_DEPLOY_BASE/.fake-running" ;;
   save) touch "$YOH_DEPLOY_BASE/.fake-saved" ;;
   *) exit 3 ;;
@@ -122,7 +127,8 @@ printf 200
         self.assertEqual((self.base / '.deploy-state/current-commit').read_text().strip(), SHA)
         self.assertEqual((self.base / 'ecosystem.config.js').read_text(), '// existing custom PM2 settings\n')
         self.assertFalse(self.stage.exists())
-        self.assertEqual(self.run_script('rollback').returncode, 0)
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
         self.assertEqual((self.base / '.deploy-state/current-commit').read_text().strip(), 'unknown')
 
@@ -146,7 +152,8 @@ printf 200
         pid = int((self.base / '.fake-pid').read_text())
         self.assertEqual(Path('/proc/{}/cwd'.format(pid)).resolve(),
                          self.base / '100-1/standalone/apps/web')
-        self.assertEqual(self.run_script('rollback').returncode, 0)
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
 
     def test_candidate_uses_matching_loopback_hostname(self):
@@ -203,7 +210,8 @@ exec /bin/sleep 3600
         self.bundle()
         self.assertEqual(self.deploy().returncode, 0)
         (self.base / '100-1/standalone/apps/web/FAIL_LIVE').touch()
-        self.assertEqual(self.run_script('rollback').returncode, 0)
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
 
     def test_archive_contains_static_assets_but_no_environment_files(self):

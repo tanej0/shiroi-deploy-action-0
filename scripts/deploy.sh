@@ -32,7 +32,7 @@ running_entry() {
 # A PM2 process can retain an old resolved script after the symlink changes.
 if active_entry=$(running_entry); then old_entry=$active_entry; fi
 restart_frontend() {
-  if pm2 describe "$app" >/dev/null 2>&1; then pm2 delete "$app"; fi
+  if pm2 describe "$app" >/dev/null 2>&1; then pm2 delete "$app" || return 1; fi
   pm2 start "$config" --only "$app" --update-env
 }
 preview_pid=
