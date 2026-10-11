@@ -1,5 +1,6 @@
 """Exercise real filesystem changes with isolated PM2/HTTP stubs, never live apps."""
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -155,6 +156,31 @@ printf 200
         rollback = self.run_script('rollback')
         self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
+
+    def test_runtime_config_overrides_hardcoded_script_and_preserves_options(self):
+        self.bundle()
+        original = {'apps': [{'name': 'Yohaku', 'script': str(self.old),
+                             'cwd': str(self.base), 'max_memory_restart': '180M',
+                             'env': {'EXAMPLE': 'preserved'}},
+                            {'name': 'other', 'script': '/example/other.js'}]}
+        (self.base / 'ecosystem.config.js').write_text(
+            'module.exports = ' + json.dumps(original) + ';\n')
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        real_node = shutil.which('node', path=os.environ['PATH'])
+        parsed = subprocess.run(
+            [real_node, '-e', 'process.stdout.write(JSON.stringify(require(process.argv[1])))',
+             str(self.base / '.deploy-state/runtime.config.cjs')],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=5)
+        self.assertEqual(parsed.returncode, 0, parsed.stderr)
+        config = json.loads(parsed.stdout)
+        self.assertEqual(config['apps'][0]['script'],
+                         str(self.base / '100-1/standalone/apps/web/server.js'))
+        self.assertEqual(config['apps'][0]['env'], original['apps'][0]['env'])
+        self.assertEqual(config['apps'][0]['max_memory_restart'], '180M')
+        self.assertEqual(config['apps'][1], original['apps'][1])
+        self.assertEqual((self.base / 'ecosystem.config.js').read_text(),
+                         'module.exports = ' + json.dumps(original) + ';\n')
 
     def test_candidate_uses_matching_loopback_hostname(self):
         self.bundle()

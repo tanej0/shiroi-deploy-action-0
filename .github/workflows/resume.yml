@@ -1,0 +1,61 @@
+name: Resume staged frontend update
+on:
+  workflow_dispatch:
+    inputs:
+      staged_release:
+        description: 'Failed run ID-attempt with a package still uploaded'
+        required: true
+        type: string
+      source_commit:
+        description: 'Full theme commit shown in the failed run'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: yohaku-production
+  cancel-in-progress: false
+jobs:
+  resume:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      STAGED_RELEASE: ${{ inputs.staged_release }}
+      SOURCE_SHA: ${{ inputs.source_commit }}
+      RELEASE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate selected package
+        run: |
+          [[ "$STAGED_RELEASE" =~ ^[0-9]+-[0-9]+$ ]]
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Upload repaired deployment script
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          source: scripts/deploy.sh
+          strip_components: 1
+          target: /tmp/yohaku-${{ env.STAGED_RELEASE }}
+      - name: Resume verified package deployment
+        uses: appleboy/ssh-action@v1.2.5
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          command_timeout: 6m
+          envs: STAGED_RELEASE,SOURCE_SHA,RELEASE_ID
+          script: |
+            set -e
+            if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+            stage="/tmp/yohaku-$STAGED_RELEASE"
+            bash "$stage/deploy.sh" deploy "$stage" "$RELEASE_ID" "$SOURCE_SHA"
+      - name: Report verified source
+        run: |
+          printf '## Resumed blog update\n\nSource commit: `%s`\n\nRunning release and HTTP health checks passed.\n' "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
