@@ -25,7 +25,7 @@ switched=false
 
 health() {
   local target_port=$1 code
-  code=$(curl -sS -L --max-time 5 -o /dev/null -w '%{http_code}' "http://127.0.0.1:$target_port/" 2>/dev/null) || return 1
+  code=$(curl -sS -L --max-time 5 -o /dev/null -w '%{http_code}' "http://localhost:$target_port/" 2>/dev/null) || return 1
   [[ $code == 200 ]]
 }
 wait_healthy() {
@@ -93,7 +93,9 @@ case "${1:-}" in
     (
       cd "$entry_dir"
       exec 9>&-
-      export NODE_ENV=production HOSTNAME=127.0.0.1 PORT="$preview_port"
+      # Next's locale middleware normalizes numeric loopback to localhost.
+      # Match that origin to keep rewrites internal instead of redirecting again.
+      export NODE_ENV=production HOSTNAME=localhost PORT="$preview_port"
       exec node ./server.js
     ) > "$state/preview.log" 2>&1 &
     preview_pid=$!
