@@ -119,7 +119,11 @@ jobs:
           capture_stdout: true
           script: |
             set -e
-            entry=$(readlink -f "$HOME/yohaku/server.js")
+            if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+            pid=$(pm2 pid Yohaku)
+            if ! [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]]; then echo unknown; exit 0; fi
+            directory=$(readlink -f "/proc/$pid/cwd")
+            entry="$directory/server.js"
             commit_file="${entry%/standalone/apps/web/server.js}/source.commit"
             if [ -f "$commit_file" ]; then
               cat "$commit_file"

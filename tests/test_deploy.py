@@ -24,6 +24,8 @@ class DeployTests(unittest.TestCase):
         (self.base / '.env').write_text('EXAMPLE=local-only\n')
         (self.base / 'ecosystem.config.js').write_text('// existing custom PM2 settings\n')
         (self.base / '.fake-running').write_text(str(self.old))
+        self.live_process = subprocess.Popen(['/bin/sleep', '3600'], cwd=str(self.old.parent))
+        (self.base / '.fake-pid').write_text(str(self.live_process.pid))
         self.bin = self.root / 'bin'
         self.bin.mkdir()
         self.stub('node', '#!/bin/bash\npwd > "$YOH_DEPLOY_BASE/.fake-preview"\nexec /bin/sleep 3600\n')
@@ -32,10 +34,21 @@ class DeployTests(unittest.TestCase):
         self.stub('pm2', '''#!/bin/bash
 set -e
 case "$1" in
-  describe) exit 0 ;;
-  reload)
+  describe) test -f "$YOH_DEPLOY_BASE/.fake-running" ;;
+  pid) cat "$YOH_DEPLOY_BASE/.fake-pid" ;;
+  delete)
+    kill "$(cat "$YOH_DEPLOY_BASE/.fake-pid")" 2>/dev/null || true
+    rm -f "$YOH_DEPLOY_BASE/.fake-running" "$YOH_DEPLOY_BASE/.fake-pid" ;;
+  start)
     target=$(readlink -f "$YOH_DEPLOY_BASE/server.js")
     test ! -f "$(dirname "$target")/FAIL_RELOAD" || exit 1
+    (cd "$(dirname "$target")"; exec /bin/sleep 3600) </dev/null >/dev/null 2>&1 &
+    pid=$!
+    echo "$pid" > "$YOH_DEPLOY_BASE/.fake-pid"
+    for ((i=0; i<100; i++)); do
+      [[ $(readlink -f "/proc/$pid/cwd") == "$(dirname "$target")" ]] && break
+      /bin/sleep 0.01
+    done
     echo "$target" > "$YOH_DEPLOY_BASE/.fake-running" ;;
   save) touch "$YOH_DEPLOY_BASE/.fake-saved" ;;
   *) exit 3 ;;
@@ -60,6 +73,15 @@ printf 200
         self.stage.mkdir()
 
     def tearDown(self):
+        pid_file = self.base / '.fake-pid'
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), 15)
+            except ProcessLookupError:
+                pass
+        if self.live_process.poll() is None:
+            self.live_process.terminate()
+        self.live_process.wait(timeout=5)
         self.tmp.cleanup()
 
     def stub(self, name, text):
@@ -105,7 +127,8 @@ printf 200
         self.assertEqual((self.base / '.deploy-state/current-commit').read_text().strip(), SHA)
         self.assertEqual((self.base / 'ecosystem.config.js').read_text(), '// existing custom PM2 settings\n')
         self.assertFalse(self.stage.exists())
-        self.assertEqual(self.run_script('rollback').returncode, 0)
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
         self.assertEqual((self.base / '.deploy-state/current-commit').read_text().strip(), 'unknown')
 
@@ -114,6 +137,23 @@ printf 200
         result = self.deploy()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Candidate failed', result.stderr)
+        self.assert_old()
+
+    def test_stale_symlink_preserves_actual_running_release_for_rollback(self):
+        self.bundle()
+        stale = self.base / 'stale/standalone/apps/web/server.js'
+        stale.parent.mkdir(parents=True)
+        stale.write_text('// linked but never running\n')
+        (self.base / 'server.js').unlink()
+        (self.base / 'server.js').symlink_to(stale)
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.base / '.deploy-state/previous-entry').read_text().strip(), str(self.old))
+        pid = int((self.base / '.fake-pid').read_text())
+        self.assertEqual(Path('/proc/{}/cwd'.format(pid)).resolve(),
+                         self.base / '100-1/standalone/apps/web')
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
 
     def test_candidate_uses_matching_loopback_hostname(self):
@@ -170,7 +210,8 @@ exec /bin/sleep 3600
         self.bundle()
         self.assertEqual(self.deploy().returncode, 0)
         (self.base / '100-1/standalone/apps/web/FAIL_LIVE').touch()
-        self.assertEqual(self.run_script('rollback').returncode, 0)
+        rollback = self.run_script('rollback')
+        self.assertEqual(rollback.returncode, 0, rollback.stdout + rollback.stderr)
         self.assert_old()
 
     def test_archive_contains_static_assets_but_no_environment_files(self):

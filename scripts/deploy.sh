@@ -20,6 +20,22 @@ test -f "$config"
 test -L "$base/server.js"
 old_entry=$(readlink -f "$base/server.js")
 pm2 describe "$app" >/dev/null
+running_entry() {
+  local pid directory
+  pid=$(pm2 pid "$app")
+  [[ $pid =~ ^[0-9]+$ && $pid -gt 0 ]] || return 1
+  directory=$(readlink -f "/proc/$pid/cwd") || return 1
+  [[ $directory == "$base/"*/standalone/apps/web ]] || return 1
+  test -f "$directory/server.js" || return 1
+  printf '%s/server.js\n' "$directory"
+}
+# A PM2 process can retain an old resolved script after the symlink changes.
+if active_entry=$(running_entry); then old_entry=$active_entry; fi
+restart_frontend() {
+  if pm2 describe "$app" >/dev/null 2>&1; then pm2 delete "$app" || return 1; fi
+  # The frontend must not inherit the deployment lock after this script exits.
+  pm2 start "$config" --only "$app" --update-env 9>&-
+}
 preview_pid=
 switched=false
 
@@ -54,7 +70,7 @@ finish() {
   stop_preview
   if [[ $rc -ne 0 && $switched == true ]]; then
     echo 'Update failed after switching; restoring the previous frontend.' >&2
-    if link_entry "$old_entry" && pm2 reload "$config" --only "$app" --update-env && wait_healthy "$port" && pm2 save; then
+    if link_entry "$old_entry" && restart_frontend && wait_healthy "$port" && pm2 save; then
       echo 'Previous frontend restored and HTTP health check passed.' >&2
     else
       echo 'ROLLBACK FAILED: inspect PM2 logs before retrying.' >&2
@@ -123,8 +139,9 @@ esac
 
 link_entry "$entry"
 switched=true
-pm2 reload "$config" --only "$app" --update-env
+restart_frontend
 wait_healthy "$port" || { echo 'Live health check failed.' >&2; exit 1; }
+test "$(running_entry)" = "$entry" || { echo 'Running process does not use the selected release.' >&2; exit 1; }
 pm2 save
 if [[ ${1:-} == deploy ]]; then install -m 0700 "$stage/deploy.sh" "$base/deploy.sh"; fi
 printf '%s\n' "$old_entry" > "$state/previous-entry"
