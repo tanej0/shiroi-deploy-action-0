@@ -137,7 +137,8 @@ jobs:
           DEPLOYED_SHA: ${{ steps.installed.outputs.stdout }}
         run: |
           skip=false
-          deployed=$(printf '%s' "$DEPLOYED_SHA" | tr -d '\r\n')
+          # ssh-action also captures its success banner; accept only a SHA line.
+          deployed=$(printf '%s\n' "$DEPLOYED_SHA" | tr -d '\r' | grep -E '^[0-9a-f]{40}$' || true)
           if [[ "$OPERATION" == check ]]; then
             skip=true
             echo '- Check passed: repository secrets present, private source readable, server SSH connected. No deployment requested.' >> "$GITHUB_STEP_SUMMARY"
