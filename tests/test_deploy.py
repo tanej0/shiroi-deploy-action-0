@@ -116,6 +116,21 @@ printf 200
         self.assertIn('Candidate failed', result.stderr)
         self.assert_old()
 
+    def test_candidate_uses_matching_loopback_hostname(self):
+        self.bundle()
+        self.stub('node', '''#!/bin/bash
+test "$HOSTNAME" = localhost || exit 1
+pwd > "$YOH_DEPLOY_BASE/.fake-preview"
+exec /bin/sleep 3600
+''')
+        curl = self.bin / 'curl'
+        curl.write_text(curl.read_text().replace(
+            'test -f "$YOH_DEPLOY_BASE/.fake-preview" || exit 22',
+            '[[ "$url" == http://localhost:12323/ ]] || exit 22\n'
+            '  test -f "$YOH_DEPLOY_BASE/.fake-preview" || exit 22'))
+        result = self.deploy()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_live_failure_restores_previous(self):
         self.bundle('FAIL_LIVE')
         result = self.deploy()
