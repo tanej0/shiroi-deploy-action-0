@@ -33,7 +33,8 @@ running_entry() {
 if active_entry=$(running_entry); then old_entry=$active_entry; fi
 restart_frontend() {
   if pm2 describe "$app" >/dev/null 2>&1; then pm2 delete "$app" || return 1; fi
-  pm2 start "$config" --only "$app" --update-env
+  # The frontend must not inherit the deployment lock after this script exits.
+  pm2 start "$config" --only "$app" --update-env 9>&-
 }
 preview_pid=
 switched=false
