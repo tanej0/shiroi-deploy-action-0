@@ -1,5 +1,30 @@
 # Yohaku Deploy Action
 
+## 本站的便捷更新入口
+
+此 fork 已改为手动更新。修改部署脚本、合并 PR 或编辑 README 都不会自动更新线上主题。
+
+- 打开 [更新页面](https://github.com/tanej0/shiroi-deploy-action-0/actions/workflows/deploy.yml)，点 **Run workflow**，保持部署仓库分支为 `main`。
+- `operation=update`：更新主题；`source_ref=main` 使用作者最新版本，也可填写分支、标签或完整提交号。无须更新时会跳过；`force=true` 可强制重建。
+- `operation=check`：仅检查已有配置、私有源码访问权限和服务器连接，不编译、不部署。
+- `operation=rollback`：恢复上一次成功更新前的版本，无须重新编译。首次使用新流程成功更新后才有回退记录。
+
+也可以直接让助手操作：在 `main` 上修改 `update-request.json`，填写 `operation`、`source_ref`、布尔值 `force` 和本次唯一的 `request_id` 并提交，即会触发同一流程。初始 `operation=none` 不部署。此入口沿用仓库已有 Secrets，不依赖本机 GitHub CLI 登录。
+
+本机安装并登录 GitHub CLI 后，还可以运行：
+
+```powershell
+./scripts/update.ps1
+./scripts/update.ps1 -SourceRef <提交号>
+./scripts/update.ps1 -Rollback
+```
+
+构建在 GitHub 的 Linux runner 上完成。服务器先校验上传文件，在本机临时端口启动候选版本，通过 HTTP 检查后才切换 PM2；切换或检查失败会尝试恢复原版本，并在失败日志中明确报告回退结果。回退也可能失败，此时需检查服务器进程和日志。
+
+服务器沿用原部署用户的 `~/yohaku/.env` 和 `ecosystem.config.js`，需要已存在的 `server.js` 链接与 PM2 `Yohaku` 应用；旧版本目录保留。每个版本有独立运行缓存。前端更新不修改 mx-core 数据库，更新前仍须确认前后端版本兼容。
+
+下面保留作者原部署说明；本 fork 的触发和回退方式以本节为准。
+
 > **Note:** 本仓库已重命名为 **yohaku-deploy-action**（原名为 `shiroi-deploy-action`）。GitHub 会自动处理旧链接的重定向，原有 fork 和引用不受影响。
 
 这是一个利用 GitHub Action 去构建私有版本站点并部署到远程服务器的工作流。

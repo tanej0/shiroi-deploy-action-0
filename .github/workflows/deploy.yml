@@ -1,271 +1,249 @@
-name: Build and Deploy
+name: Update blog frontend
+
 on:
   push:
-    branches:
-      - main
-  # schedule:
-  #   - cron: '0 3 * * *'
-
+    branches: [main]
+    paths: [update-request.json]
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: 'Update frontend or restore the previous release'
+        default: update
+        type: choice
+        options: [update, rollback, check]
+      source_ref:
+        description: 'Theme branch, tag or commit (main = latest)'
+        required: true
+        default: main
+        type: string
+      force:
+        description: 'Rebuild even if this version was already deployed'
+        default: false
+        type: boolean
   repository_dispatch:
     types: [trigger-workflow]
 
-permissions: write-all
+# Editing deployment tools never deploys the live site.
+permissions:
+  contents: read
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  HASH_FILE: build_hash
-  SOURCE_REPO: innei-dev/Yohaku
-  BUILD_COMMAND: pnpm --filter @yohaku/web build:ci
-  STANDALONE_SUBPATH: standalone/apps/web
+  group: yohaku-production
+  cancel-in-progress: false
 
 jobs:
-  prepare:
-    name: Prepare
+  request:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
     runs-on: ubuntu-latest
-    if: ${{ github.event.head_commit.message != 'Update hash file' }}
-
+    timeout-minutes: 3
     outputs:
-      hash_content: ${{ steps.read_hash.outputs.hash_content }}
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Read HASH_FILE content
-        id: read_hash
-        run: |
-          content=$(cat ${{ env.HASH_FILE }}) || true
-          echo "hash_content=$content" >> "$GITHUB_OUTPUT"
-  check:
-    name: Check Should Rebuild
-    runs-on: ubuntu-latest
-    needs: prepare
-    outputs:
-      canceled: ${{ steps.use_content.outputs.canceled }}
-
+      operation: ${{ steps.request.outputs.operation }}
+      source_ref: ${{ steps.request.outputs.source_ref }}
+      force: ${{ steps.request.outputs.force }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          repository: innei-dev/Yohaku
-          token: ${{ secrets.GH_PAT }} # `GH_PAT` is a secret that contains your PAT
-          fetch-depth: 0
-          lfs: true
-          submodules: recursive
-
-      - name: Use content from prev job and compare
-        id: use_content
+      - name: Read and validate update request
+        id: request
         env:
-          FILE_HASH: ${{ needs.prepare.outputs.hash_content }}
-        run: |
-          file_hash=$FILE_HASH
-          current_hash=$(git rev-parse --short HEAD)
-          echo "File Hash: $file_hash"
-          echo "Current Git Hash: $current_hash"
-          if [ "$file_hash" == "$current_hash" ]; then
-            echo "Hashes match. Stopping workflow."
-            echo "canceled=true" >> $GITHUB_OUTPUT
-          else
-            echo "Hashes do not match. Continuing workflow."
-          fi
+          EVENT_NAME: ${{ github.event_name }}
+          OPERATION: ${{ inputs.operation || github.event.client_payload.operation || 'update' }}
+          SOURCE_REF: ${{ inputs.source_ref || github.event.client_payload.source_ref || 'main' }}
+          FORCE: ${{ inputs.force || github.event.client_payload.force || false }}
+        run: node scripts/read-request.cjs
 
-  build:
-    name: Build artifact
+  update:
+    needs: request
+    if: needs.request.outputs.operation == 'update' || needs.request.outputs.operation == 'check'
     runs-on: ubuntu-latest
-    needs: check
-    if: ${{needs.check.outputs.canceled != 'true'}}
-
-    strategy:
-      matrix:
-        node-version: [lts/*]
-    outputs:
-      sha_short: ${{ steps.store.outputs.sha_short }}
-      branch: ${{ steps.store.outputs.branch }}
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      SOURCE_REPO: innei-dev/Yohaku
+      OPERATION: ${{ needs.request.outputs.operation }}
+      SOURCE_REF: ${{ needs.request.outputs.source_ref }}
+      FORCE: ${{ needs.request.outputs.force }}
+      BASE_URL: ${{ secrets.BASE_URL }}
+      NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+      NEXT_PUBLIC_GATEWAY_URL: ${{ secrets.NEXT_PUBLIC_GATEWAY_URL }}
+      RELEASE_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout deployment tools
+        uses: actions/checkout@v4
+        with:
+          path: deployment
+      - name: Check configuration
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+          HOST: ${{ secrets.HOST }}
+          USER: ${{ secrets.USER }}
+          PASSWORD: ${{ secrets.PASSWORD }}
+          KEY: ${{ secrets.KEY }}
+        run: |
+          node <<'NODE'
+          for (const key of ['GH_PAT', 'HOST', 'USER', 'BASE_URL', 'NEXT_PUBLIC_API_URL', 'NEXT_PUBLIC_GATEWAY_URL']) {
+            if (!process.env[key]) throw new Error(`Missing repository secret: ${key}`);
+          }
+          if (!process.env.PASSWORD && !process.env.KEY) throw new Error('Set KEY or PASSWORD');
+          if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(process.env.SOURCE_REF)) throw new Error('Invalid source ref');
+          if (!['true', 'false'].includes(process.env.FORCE)) throw new Error('force must be boolean');
+          for (const key of ['BASE_URL', 'NEXT_PUBLIC_API_URL', 'NEXT_PUBLIC_GATEWAY_URL']) {
+            const url = new URL(process.env[key]);
+            if (!['http:', 'https:'].includes(url.protocol)) throw new Error(`Invalid URL: ${key}`);
+          }
+          NODE
+      - name: Checkout selected theme version
+        uses: actions/checkout@v4
         with:
           repository: ${{ env.SOURCE_REPO }}
-          token: ${{ secrets.GH_PAT }} # `GH_PAT` is a secret that contains your PAT
-          fetch-depth: 0
+          ref: ${{ env.SOURCE_REF }}
+          token: ${{ secrets.GH_PAT }}
+          path: source
           lfs: true
           submodules: recursive
-
-      - name: Checkout LFS objects1
-        run: git lfs checkout
-      - uses: pnpm/action-setup@v2
-
-      - name: Use Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'pnpm'
-      - uses: jongwooo/next-cache@v1
-      - name: Install dependencies
-        run: pnpm install
-      - name: Build project
-        env:
-          BASE_URL: ${{ secrets.BASE_URL }}
-          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
-          NEXT_PUBLIC_GATEWAY_URL: ${{ secrets.NEXT_PUBLIC_GATEWAY_URL }}
+          persist-credentials: false
+      - name: Resolve selected source commit
+        id: version
         run: |
-          ${{ env.BUILD_COMMAND }}
-          cd apps/web/.next
-          rm -rf cache
-          cp -r ../public ./standalone/public
-          mv ./static ./standalone/apps/web/.next/static
-          cd ./standalone
-          echo ';process.title = "Yohaku (NextJS)"' >> server.js
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p assets
-          rm -f assets/release.zip
-          (cd apps/web/.next && zip --symlinks -r "$GITHUB_WORKSPACE/assets/release.zip" ./* -x "dev/*" -x "cache/*")
-
-      # - uses: actions/upload-artifact@v4
-      #   with:
-      #     name: dist
-      #     path: assets/release.zip
-      #     retention-days: 7
-      - name: Cache Build Artifacts
-        id: cache-primes
-        uses: actions/cache/save@v4
-        with:
-          path: assets
-          key: ${{ github.run_number }}-release
-
-      - name: Store artifact commit version
-        shell: bash
-        id: store
-        run: |
-          sha_short=$(git rev-parse --short HEAD)
-          branch_name=$(git rev-parse --abbrev-ref HEAD)
-          echo "sha_short=$sha_short" >> "$GITHUB_OUTPUT"
-          echo "branch=$branch_name" >> "$GITHUB_OUTPUT"
-
-  deploy:
-    name: Deploy artifact
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      # - name: Download artifact
-      #   uses: actions/download-artifact@v4
-      #   with:
-      #     name: dist
-
-      - name: Restore cached Build Artifacts
-        id: cache-primes-restore
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            assets
-          key: ${{ github.run_number }}-release
-      - name: Move assets to root
-        run: mv assets/release.zip release.zip
-
-      - name: Prepare standalone PM2 config
-        run: cp pm2/ecosystem.config.js ecosystem.config.js
-
-      - name: copy file via ssh password
-        uses: appleboy/scp-action@v0.1.7
+          source_sha=$(git -C source rev-parse HEAD)
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+          printf '## Blog update\n\n- Requested version: `%s`\n- Source commit: `%s`\n' "$SOURCE_REF" "$source_sha" >> "$GITHUB_STEP_SUMMARY"
+      - name: Read version actually deployed on the server
+        id: installed
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.HOST }}
           username: ${{ secrets.USER }}
           password: ${{ secrets.PASSWORD }}
           key: ${{ secrets.KEY }}
-          port: ${{ secrets.PORT }}
-          source: 'release.zip'
-          target: '/tmp/yohaku'
-
-      - name: copy PM2 config via ssh password
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USER }}
-          password: ${{ secrets.PASSWORD }}
-          key: ${{ secrets.KEY }}
-          port: ${{ secrets.PORT }}
-          source: 'ecosystem.config.js'
-          target: '/tmp/yohaku'
-
-      - name: Exec deploy script with SSH
-        uses: appleboy/ssh-action@master
-
-        with:
-          command_timeout: 5m
-          host: ${{ secrets.HOST }}
-          username: ${{ secrets.USER }}
-          password: ${{ secrets.PASSWORD }}
-          key: ${{ secrets.KEY }}
-          port: ${{ secrets.PORT }}
+          port: ${{ secrets.PORT || '22' }}
+          capture_stdout: true
           script: |
             set -e
-            source $HOME/.bashrc
-            basedir=$HOME/yohaku
-            workdir=$basedir/${{ github.run_number }}
-            mkdir -p $workdir
-            mkdir -p $basedir/.cache
-            mv /tmp/yohaku/release.zip $workdir/release.zip
-            install -m 644 /tmp/yohaku/ecosystem.config.js $basedir/ecosystem.config.js
-            cd $workdir
-            unzip -qq -o $workdir/release.zip
-            rm -r /tmp/yohaku
-            rm -rf $workdir/${{ env.STANDALONE_SUBPATH }}/.env
-            ln -s $HOME/yohaku/.env $workdir/${{ env.STANDALONE_SUBPATH }}/.env
-            export NEXT_SHARP_PATH=$(npm root -g)/sharp
-            # https://github.com/Unitech/pm2/issues/3054
-            # symlink workdir node entry file to basedir
-            ln -sf $workdir/${{ env.STANDALONE_SUBPATH }}/server.js $basedir/server.js
-            mkdir -p $workdir/${{ env.STANDALONE_SUBPATH }}/.next
-            rm -rf $workdir/${{ env.STANDALONE_SUBPATH }}/.next/cache
-            ln -sf $basedir/.cache $workdir/${{ env.STANDALONE_SUBPATH }}/.next/cache
-            cd $basedir
-            if pm2 describe Yohaku >/dev/null 2>&1; then
-              pm2 reload ecosystem.config.js --update-env
+            entry=$(readlink -f "$HOME/yohaku/server.js")
+            commit_file="${entry%/standalone/apps/web/server.js}/source.commit"
+            if [ -f "$commit_file" ]; then
+              cat "$commit_file"
             else
-              pm2 start ecosystem.config.js --update-env
+              echo unknown
             fi
-            rm $workdir/release.zip
-            pm2 save
-            echo "Deployed successfully"
-
-      - name: After deploy script
+      - name: Skip only if the live version matches
+        id: decision
+        env:
+          SOURCE_SHA: ${{ steps.version.outputs.sha }}
+          DEPLOYED_SHA: ${{ steps.installed.outputs.stdout }}
         run: |
-          hash=${{ needs.build.outputs.sha_short }}
-          # curl -X "POST" "https://mx.innei.in/api/v2/fn/shiro/new-version-hook" -H 'Content-Type: application/json' -d "{\"hash\": \"$hash\", \"key\": \"\"}"
-          ${{ secrets.AFTER_DEPLOY_SCRIPT }}
-  store:
-    name: Store artifact commit version
+          skip=false
+          deployed=$(printf '%s' "$DEPLOYED_SHA" | tr -d '\r\n')
+          if [[ "$OPERATION" == check ]]; then
+            skip=true
+            echo '- Check passed: repository secrets present, private source readable, server SSH connected. No deployment requested.' >> "$GITHUB_STEP_SUMMARY"
+          elif [[ "$FORCE" == false && "$SOURCE_SHA" == "$deployed" ]]; then
+            skip=true
+            echo '- Already deployed; no server changes.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "skip=$skip" >> "$GITHUB_OUTPUT"
+      - name: Set up Node.js
+        if: steps.decision.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Set up pnpm declared by the theme
+        if: steps.decision.outputs.skip != 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: source/package.json
+      - name: Install locked dependencies
+        if: steps.decision.outputs.skip != 'true'
+        working-directory: source
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        if: steps.decision.outputs.skip != 'true'
+        working-directory: source
+        env:
+          CI: 'true'
+          NEXT_TELEMETRY_DISABLED: '1'
+        run: pnpm --filter @yohaku/web build:ci
+      - name: Package standalone output
+        if: steps.decision.outputs.skip != 'true'
+        env:
+          SOURCE_SHA: ${{ steps.version.outputs.sha }}
+        run: bash deployment/scripts/package.sh source upload
+      - name: Upload release and deployment script
+        if: steps.decision.outputs.skip != 'true'
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          source: upload/*
+          strip_components: 1
+          target: /tmp/yohaku-${{ env.RELEASE_ID }}
+      - name: Check candidate and switch frontend
+        if: steps.decision.outputs.skip != 'true'
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          SOURCE_SHA: ${{ steps.version.outputs.sha }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          command_timeout: 6m
+          envs: RELEASE_ID,SOURCE_SHA
+          script: |
+            set -e
+            if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+            bash "/tmp/yohaku-$RELEASE_ID/deploy.sh" deploy "/tmp/yohaku-$RELEASE_ID" "$RELEASE_ID" "$SOURCE_SHA"
+      - name: Record successfully deployed version
+        if: steps.decision.outputs.skip != 'true'
+        working-directory: deployment
+        env:
+          SOURCE_SHA: ${{ steps.version.outputs.sha }}
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          printf '%s\n' "$SOURCE_SHA" > build_hash
+          git add build_hash
+          if ! git diff --cached --quiet; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git commit -m 'chore: record deployed frontend version'
+            git push origin HEAD:main
+          fi
+      - name: Report result
+        if: always() && steps.decision.outputs.skip != 'true'
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          printf '\n- Result: **%s**\n' "$RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo '- Candidate is checked before switching; a failed switch attempts rollback.' >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    needs: request
+    if: needs.request.outputs.operation == 'rollback'
     runs-on: ubuntu-latest
-    needs: [deploy, build]
+    timeout-minutes: 8
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Restore previous frontend and check health
+        uses: appleboy/ssh-action@v1.2.5
         with:
-          persist-credentials: false # otherwise, the token used is the GITHUB_TOKEN, instead of your personal token
-          fetch-depth: 0 # otherwise, you will failed to push refs to dest repo
-      # Get the commit version from the build job
-      - name: Use outputs from build
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          command_timeout: 6m
+          script: |
+            set -e
+            if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+            test -f "$HOME/yohaku/deploy.sh" || { echo 'Rollback becomes available after the first update with this workflow.'; exit 1; }
+            bash "$HOME/yohaku/deploy.sh" rollback
+      - name: Report rollback result
+        if: always()
         env:
-          SHA_SHORT: ${{ needs.build.outputs.sha_short }}
-          BRANCH: ${{ needs.build.outputs.branch }}
+          RESULT: ${{ job.status }}
         run: |
-          echo "SHA Short from build: $SHA_SHORT"
-          echo "Branch from build: $BRANCH"
-      - name: Write hash to file
-        env:
-          SHA_SHORT: ${{ needs.build.outputs.sha_short }}
-
-        run: echo $SHA_SHORT > ${{ env.HASH_FILE }}
-      - name: Commit files
-        run: |
-          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git config --local user.name "github-actions[bot]"
-          git add ${{ env.HASH_FILE }}
-          git commit -a -m "Update hash file"
-      - name: Push changes
-        uses: ad-m/github-push-action@master
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          branch: ${{ github.ref }}
+          printf '## Frontend rollback\n\nResult: **%s**\n' "$RESULT" >> "$GITHUB_STEP_SUMMARY"
