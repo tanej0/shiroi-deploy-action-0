@@ -1,0 +1,44 @@
+name: Recover frontend after server reboot
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: yohaku-production
+  cancel-in-progress: false
+jobs:
+  recover:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Upload recovery helper
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          source: scripts/recover-frontend.sh
+          strip_components: 1
+          target: /tmp/yohaku-recovery-${{ github.run_id }}
+      - name: Restore current release and enable user autostart
+        uses: appleboy/ssh-action@v1.2.5
+        env:
+          RECOVERY_ID: ${{ github.run_id }}
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USER }}
+          password: ${{ secrets.PASSWORD }}
+          key: ${{ secrets.KEY }}
+          port: ${{ secrets.PORT || '22' }}
+          command_timeout: 5m
+          envs: RECOVERY_ID
+          script: |
+            set -e
+            stage="/tmp/yohaku-recovery-$RECOVERY_ID"
+            bash "$stage/recover-frontend.sh" install-autostart
+            rm -f -- "$stage/recover-frontend.sh"
+            rmdir -- "$stage"
