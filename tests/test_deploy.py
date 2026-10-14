@@ -263,6 +263,30 @@ exec /bin/sleep 3600
         self.assertIn('standalone/apps/web/public/logo.svg', names)
         self.assertFalse(any(Path(name).name.startswith('.env') for name in names))
 
+    def test_recovery_restores_stopped_app_and_preserves_crontab(self):
+        self.bundle()
+        self.assertEqual(self.deploy().returncode, 0)
+        subprocess.run(['pm2', 'delete', 'Yohaku'], env=self.env, check=True)
+        cron_store = self.base / '.fake-crontab'
+        original = '15 3 * * * /example/existing-task\n'
+        cron_store.write_text(original)
+        self.stub('crontab', '''#!/bin/bash
+if [[ "$1" == -l ]]; then cat "$YOH_DEPLOY_BASE/.fake-crontab"; else cp "$1" "$YOH_DEPLOY_BASE/.fake-crontab"; fi
+''')
+        for _ in range(2):
+            recovered = subprocess.run(
+                ['bash', str(ROOT / 'scripts/recover-frontend.sh'), 'install-autostart'],
+                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, timeout=15)
+            self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
+        cron_text = cron_store.read_text()
+        self.assertIn(original, cron_text)
+        self.assertEqual(cron_text.count('# codex-yohaku-autostart'), 1)
+        self.assertTrue((self.base / 'boot-frontend.sh').exists())
+        self.assertIn('Current frontend restored', recovered.stdout)
+        self.assertEqual((self.base / '.fake-running').read_text().strip(),
+                         str(self.base / '100-1/standalone/apps/web/server.js'))
+
 
 if __name__ == '__main__':
     unittest.main()
