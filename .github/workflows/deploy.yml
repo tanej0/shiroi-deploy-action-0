@@ -130,6 +130,12 @@ jobs:
             else
               echo unknown
             fi
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check realtime compatibility and actual WebSocket events
+        run: node deployment/scripts/check-realtime.cjs source/apps/web/src/socket/io.worker.ts
       - name: Skip only if the live version matches
         id: decision
         env:
@@ -147,11 +153,6 @@ jobs:
             echo '- Already deployed; no server changes.' >> "$GITHUB_STEP_SUMMARY"
           fi
           echo "skip=$skip" >> "$GITHUB_OUTPUT"
-      - name: Set up Node.js
-        if: steps.decision.outputs.skip != 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
       - name: Set up pnpm declared by the theme
         if: steps.decision.outputs.skip != 'true'
         uses: pnpm/action-setup@v6
