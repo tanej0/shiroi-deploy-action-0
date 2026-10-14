@@ -270,13 +270,19 @@ exec /bin/sleep 3600
         cron_store = self.base / '.fake-crontab'
         original = '15 3 * * * /example/existing-task\n'
         cron_store.write_text(original)
+        shell_home = self.root / 'shell-home'
+        shell_home.mkdir()
+        (shell_home / '.bashrc').write_text(
+            'if [ -z "$BASHRCSOURCED" ]; then BASHRCSOURCED=Y; fi\n')
+        recovery_env = dict(self.env, HOME=str(shell_home))
+        recovery_env.pop('BASHRCSOURCED', None)
         self.stub('crontab', '''#!/bin/bash
 if [[ "$1" == -l ]]; then cat "$YOH_DEPLOY_BASE/.fake-crontab"; else cp "$1" "$YOH_DEPLOY_BASE/.fake-crontab"; fi
 ''')
         for _ in range(2):
             recovered = subprocess.run(
                 ['bash', str(ROOT / 'scripts/recover-frontend.sh'), 'install-autostart'],
-                env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=recovery_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True, timeout=15)
             self.assertEqual(recovered.returncode, 0, recovered.stdout + recovered.stderr)
         cron_text = cron_store.read_text()

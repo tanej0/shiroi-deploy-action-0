@@ -1,7 +1,9 @@
 #!/bin/bash
-set -euo pipefail
+set -eo pipefail
 umask 077
+# System shell startup files may legitimately reference unset variables.
 if [ -f "$HOME/.bashrc" ]; then . "$HOME/.bashrc"; fi
+set -u
 base=$(realpath "${YOH_DEPLOY_BASE:-$HOME/yohaku}")
 app=${YOH_PM2_APP:-Yohaku}
 port=${YOH_PORT:-2323}
